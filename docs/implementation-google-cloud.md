@@ -622,6 +622,14 @@ For a typical tenant (500 users, nightly exports), expect approximately:
 
 ## 11. Troubleshooting
 
+### Security Properties
+
+The framework provides the following security guarantees by design:
+
+- **No key material on disk**: Service account keys from Secret Manager are loaded directly into memory and passed to `google.oauth2.service_account.Credentials.from_service_account_info()`. No temporary files are created, so there is no risk of residual secrets on the Cloud Build worker's filesystem.
+- **Automatic retry**: All Google API calls (exports, imports, discovery) retry automatically with exponential backoff on HTTP 429 (rate limit) and 5xx (transient) errors. A build will not fail because of a single API hiccup.
+- **Specific error handling**: Base64 decoding of secrets logs precise failure reasons (`binascii.Error`, `UnicodeDecodeError`, `json.JSONDecodeError`) instead of swallowing errors silently.
+
 ### "403 Not Authorized to access this resource" from Google Admin APIs
 
 The most common cause is a mismatch in domain-wide delegation. Confirm all three of these are correct: the service account's numeric Client ID is entered in the Admin Console, the OAuth scopes are complete and contain no extra whitespace, and the delegated admin email is a Super Admin that is not suspended.

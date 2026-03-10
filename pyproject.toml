@@ -34,6 +34,7 @@ dependencies = [
     "jinja2>=3.1",
     "gitpython>=3.1.40",
     "pydantic>=2.5",
+    "tenacity>=8.2.0",
 ]
 
 [project.optional-dependencies]

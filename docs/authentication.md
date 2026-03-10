@@ -171,6 +171,7 @@ directory with your tenant's customer record.
 ## Security Best Practices
 
 - **Always** store the service account key in a secrets manager (Azure Key Vault or GCP Secret Manager)
+- **Credentials are loaded in memory** — gwsdsc uses `from_service_account_info()`, not `from_service_account_file()`. No temporary key files are created on disk during pipeline execution, regardless of which secret backend is used.
 - Never commit keys to Git or embed them in pipeline definitions
 - Use environment variables to reference the key path: `$GWS_SA_KEY_PATH`
 - Rotate the key regularly
@@ -179,3 +180,4 @@ directory with your tenant's customer record.
 - Audit service account usage via Cloud Audit Logs
 - In Azure DevOps, use Variable Groups linked to Azure Key Vault
 - In Google Cloud Build, use Secret Manager with IAM-scoped access
+- **API resilience** — all Google API calls are automatically retried with exponential backoff on 429 (rate limit) and 5xx (transient) errors
