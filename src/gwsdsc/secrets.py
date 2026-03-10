@@ -1,8 +1,9 @@
 """Secrets Manager abstraction — Azure Key Vault and Google Secret Manager.
 
-Instead of referencing plain file paths for credentials, gwsdsc can
-retrieve secrets at runtime from a vault.  This keeps credentials out
-of config files, Git history, and pipeline logs.
+Credentials are resolved entirely **in memory** — no temporary files are
+written to disk.  Each backend returns a parsed ``dict`` (the service
+account JSON key) which the auth layer passes directly to
+``google.oauth2.service_account.Credentials.from_service_account_info()``.
 
 Supported backends:
   * **google_secret_manager** — Google Cloud Secret Manager
@@ -10,25 +11,19 @@ Supported backends:
   * **env** — Environment variable (simple fallback)
   * **file** — Plain file path (legacy, not recommended)
 
-Configuration in ``tenant.yaml``::
-
-    credentials:
-      secret_backend: google_secret_manager     # or azure_key_vault / env / file
-      secret_ref: "projects/my-project/secrets/gwsdsc-sa-key/versions/latest"
-      # --- Azure Key Vault options ---
-      # azure_vault_url: "https://my-vault.vault.azure.net"
-      # azure_secret_name: "gwsdsc-sa-key"
-      # azure_tenant_id: "..."        # optional — for SP auth
-      # azure_client_id: "..."        # optional
-      # azure_client_secret_env: "AZURE_CLIENT_SECRET"  # env var holding SP secret
+Security properties:
+  * Secret material never touches the filesystem (except ``file`` backend).
+  * No temporary files, no cleanup required, no residual key on disk.
+  * Base64 decoding failures are logged explicitly.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +35,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def resolve_credentials_to_file(config: dict[str, Any]) -> str:
-    """Resolve a secret reference to a temporary file path containing the key JSON.
+def resolve_credentials(config: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a secret reference to an in-memory service account key dict.
 
     Parameters
     ----------
@@ -51,9 +46,18 @@ def resolve_credentials_to_file(config: dict[str, Any]) -> str:
 
     Returns
     -------
-    str
-        Path to a temporary file holding the service-account JSON key.
-        The caller should not delete this file during the process lifetime.
+    dict
+        Parsed service-account JSON key, ready for
+        ``Credentials.from_service_account_info()``.
+
+    Raises
+    ------
+    ValueError
+        If the backend is unknown or the resolved payload is not valid JSON.
+    FileNotFoundError
+        If the ``file`` backend cannot locate the key file.
+    EnvironmentError
+        If required environment variables are not set.
     """
     backend = config.get("secret_backend", "file")
 
@@ -77,14 +81,16 @@ def resolve_credentials_to_file(config: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_file(config: dict[str, Any]) -> str:
-    """Legacy: use a plain file path or $ENV_VAR pointing to one."""
+def _resolve_file(config: dict[str, Any]) -> dict[str, Any]:
+    """Legacy: read a JSON key file from disk."""
     path = config.get("service_account_key_path", "")
     if path.startswith("$"):
         path = os.environ.get(path.lstrip("$"), path)
     if not path or not Path(path).exists():
         raise FileNotFoundError(f"Service account key not found: {path}")
-    return path
+
+    with open(path) as fh:
+        return json.load(fh)
 
 
 # ---------------------------------------------------------------------------
@@ -92,24 +98,14 @@ def _resolve_file(config: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_env(config: dict[str, Any]) -> str:
+def _resolve_env(config: dict[str, Any]) -> dict[str, Any]:
     """Read the key JSON from an environment variable."""
     env_var = config.get("secret_ref") or config.get("secret_env", "GWS_SA_KEY_JSON")
     raw = os.environ.get(env_var)
     if not raw:
         raise EnvironmentError(f"Environment variable '{env_var}' is not set or empty")
 
-    # Detect base64
-    import base64
-
-    try:
-        decoded = base64.b64decode(raw, validate=True).decode("utf-8")
-        json.loads(decoded)  # validate it's JSON
-        raw = decoded
-    except Exception:
-        pass  # assume raw JSON
-
-    return _write_temp_key(raw)
+    return _decode_payload(raw, source=f"env:{env_var}")
 
 
 # ---------------------------------------------------------------------------
@@ -117,14 +113,14 @@ def _resolve_env(config: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_google_secret_manager(config: dict[str, Any]) -> str:
+def _resolve_google_secret_manager(config: dict[str, Any]) -> dict[str, Any]:
     """Retrieve a secret from Google Cloud Secret Manager.
 
     ``secret_ref`` should be a full resource name::
 
-        projects/<project>/secrets/<name>/versions/<version>
+        projects/<project>/secrets/<n>/versions/<version>
 
-    Or just ``<name>`` (project is auto-detected, version defaults to ``latest``).
+    Or just ``<n>`` (project is auto-detected, version defaults to ``latest``).
     """
     try:
         from google.cloud import secretmanager
@@ -150,9 +146,7 @@ def _resolve_google_secret_manager(config: dict[str, Any]) -> str:
     response = client.access_secret_version(request={"name": ref})
     payload = response.payload.data.decode("UTF-8")
 
-    # Validate it's JSON
-    json.loads(payload)
-    return _write_temp_key(payload)
+    return _decode_payload(payload, source=f"gsm:{ref}")
 
 
 def _detect_gcp_project() -> str:
@@ -160,7 +154,6 @@ def _detect_gcp_project() -> str:
     project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
     if project:
         return project
-    # Try metadata server
     try:
         import urllib.request
 
@@ -182,7 +175,7 @@ def _detect_gcp_project() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_azure_key_vault(config: dict[str, Any]) -> str:
+def _resolve_azure_key_vault(config: dict[str, Any]) -> dict[str, Any]:
     """Retrieve a secret from Azure Key Vault.
 
     Required config fields:
@@ -192,11 +185,6 @@ def _resolve_azure_key_vault(config: dict[str, Any]) -> str:
     Authentication uses ``DefaultAzureCredential`` from the ``azure-identity``
     package, which supports Managed Identity, Azure CLI, environment variables,
     and Service Principal credentials automatically.
-
-    Optional overrides for Service Principal auth:
-      * ``azure_tenant_id``
-      * ``azure_client_id``
-      * ``azure_client_secret_env`` — env var name holding the SP client secret
     """
     try:
         from azure.identity import (
@@ -213,7 +201,7 @@ def _resolve_azure_key_vault(config: dict[str, Any]) -> str:
 
     vault_url = config.get("azure_vault_url")
     secret_name = config.get("azure_secret_name")
-    secret_version = config.get("azure_secret_version", "")  # empty = latest
+    secret_version = config.get("azure_secret_version", "")
 
     if not vault_url:
         raise ValueError("credentials.azure_vault_url is required for azure_key_vault backend")
@@ -252,18 +240,7 @@ def _resolve_azure_key_vault(config: dict[str, Any]) -> str:
     if not payload:
         raise ValueError(f"Secret '{secret_name}' in {vault_url} is empty")
 
-    # Detect base64-encoded payload
-    import base64
-
-    try:
-        decoded = base64.b64decode(payload, validate=True).decode("utf-8")
-        json.loads(decoded)
-        payload = decoded
-    except Exception:
-        pass  # assume raw JSON
-
-    json.loads(payload)  # validate
-    return _write_temp_key(payload)
+    return _decode_payload(payload, source=f"akv:{vault_url}/{secret_name}")
 
 
 # ---------------------------------------------------------------------------
@@ -271,13 +248,52 @@ def _resolve_azure_key_vault(config: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _write_temp_key(json_content: str) -> str:
-    """Write key JSON to a secure temp file and return its path."""
-    fd, path = tempfile.mkstemp(prefix="gwsdsc-key-", suffix=".json")
+def _decode_payload(raw: str, source: str = "unknown") -> dict[str, Any]:
+    """Decode a secret payload that may be base64-encoded or raw JSON.
+
+    Tries base64 first; on failure falls back to raw JSON parsing.
+    Uses specific exception types — never silently swallows errors.
+
+    Parameters
+    ----------
+    raw
+        The raw string from the secret store.
+    source
+        Human-readable label for log messages.
+
+    Returns
+    -------
+    dict
+        Parsed service-account key.
+
+    Raises
+    ------
+    ValueError
+        If the payload is neither valid base64(JSON) nor raw JSON.
+    """
+    # Attempt 1: base64-encoded JSON
     try:
-        os.write(fd, json_content.encode("utf-8"))
-    finally:
-        os.close(fd)
-    os.chmod(path, 0o600)
-    logger.debug("Wrote temporary key file: %s", path)
-    return path
+        decoded_bytes = base64.b64decode(raw, validate=True)
+        decoded_str = decoded_bytes.decode("utf-8")
+        parsed = json.loads(decoded_str)
+        if isinstance(parsed, dict):
+            logger.debug("Decoded base64 payload from %s", source)
+            return parsed
+    except binascii.Error as exc:
+        logger.debug("Base64 decode failed for %s (not base64): %s", source, exc)
+    except UnicodeDecodeError as exc:
+        logger.debug("Base64 payload from %s is not valid UTF-8: %s", source, exc)
+    except json.JSONDecodeError as exc:
+        logger.debug("Base64 payload from %s is not valid JSON: %s", source, exc)
+
+    # Attempt 2: raw JSON
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            logger.debug("Parsed raw JSON payload from %s", source)
+            return parsed
+        raise ValueError(f"Payload from {source} parsed as JSON but is not a dict (got {type(parsed).__name__})")
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Payload from {source} is neither valid base64(JSON) nor raw JSON: {exc}"
+        ) from exc

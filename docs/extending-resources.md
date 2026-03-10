@@ -106,10 +106,14 @@ gwsdsc catalogue   # verify it appears
 
 ## Tips
 
-- Use `self._paginate()` for endpoints that return paginated results
+- **Always use `self._call_api(request)`** instead of `request.execute()` — this wraps every API call with exponential backoff retry on 429/5xx errors
+- Use `self._paginate()` for endpoints that return paginated results (it uses `_call_api` internally)
 - Use `self.clean()` to strip ephemeral fields before storage
 - Use `self.options` to read per-resource config from `export_options`
 - The `get_key()` method is critical for correct diffing — choose a
   stable, unique identifier (email, path, name — not a volatile ID
   if possible)
 - Set `IMPORTABLE = False` for read-only resources
+- The `API_SERVICE` and `API_VERSION` fields are used to dynamically
+  resolve the Google API discovery endpoint — no need to register in
+  a separate service map

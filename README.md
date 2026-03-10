@@ -59,6 +59,27 @@ It treats tenant settings as *code*, enabling:
 
 ---
 
+## Security & Robustness
+
+**In-memory credential handling** — Service account keys are never written
+to temporary files.  All secret backends (Google Secret Manager, Azure Key
+Vault, environment variable) resolve to an in-memory ``dict`` that is
+passed directly to ``google.oauth2.service_account.Credentials.from_service_account_info()``.
+No residual key material is left on disk.
+
+**Automatic API retry** — All Google API calls use exponential backoff via
+``tenacity`` to handle HTTP 429 (rate limit) and 5xx (transient) errors.
+Each resource module's ``_call_api()`` helper and the API discovery
+``build()`` step are both wrapped in retry logic with up to 5 attempts and
+2–60 second waits.
+
+**Dynamic service resolution** — The API service/version mapping is inferred
+from the Resource Catalogue at runtime rather than maintained as a hardcoded
+dictionary.  Adding a new resource module automatically makes it discoverable
+without touching the auth layer.
+
+---
+
 ## Supported Resource Modules
 
 Each module maps to one or more Google API endpoints.

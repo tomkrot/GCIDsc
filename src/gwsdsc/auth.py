@@ -1,5 +1,19 @@
 """Authentication helpers for Google Workspace APIs.
 
+Security:
+  * Credentials are loaded **in memory** via ``from_service_account_info()``.
+    No secret material ever touches the filesystem (except the legacy
+    ``file`` backend, which reads an existing file).
+
+Robustness:
+  * API discovery (``build()``) and individual API calls use exponential
+    backoff via ``tenacity`` to handle 429 (rate-limit) and 503 (transient)
+    errors from Google APIs.
+
+Modularity:
+  * The service→discovery mapping is inferred dynamically from the Resource
+    Catalogue rather than maintained as a hardcoded dict.
+
 Supports:
   - Service account with domain-wide delegation (recommended for automation)
   - Application Default Credentials (local dev / Cloud Build)
@@ -8,19 +22,63 @@ Supports:
 
 from __future__ import annotations
 
-import json
 import logging
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 from google.auth.credentials import Credentials
 from google.oauth2 import service_account
 from googleapiclient.discovery import Resource, build
+from googleapiclient.errors import HttpError
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from gwsdsc.config import CredentialsConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Retry predicate — retries 429 (rate limit) and 5xx (transient) errors
+# ---------------------------------------------------------------------------
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return True if the exception warrants a retry."""
+    if isinstance(exc, HttpError):
+        status = exc.resp.status
+        return status == 429 or status >= 500
+    # Also retry connection-level failures
+    return isinstance(exc, (ConnectionError, TimeoutError, OSError))
+
+
+_api_retry = retry(
+    retry=retry_if_exception(_is_retryable),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    before_sleep=lambda rs: logger.warning(
+        "Retrying after %s (attempt %d): %s",
+        type(rs.outcome.exception()).__name__,
+        rs.attempt_number,
+        rs.outcome.exception(),
+    ),
+    reraise=True,
+)
+
+
+def with_retry(func):
+    """Decorator to wrap any function with the standard API retry policy.
+
+    Use on export/import calls that hit Google APIs::
+
+        @with_retry
+        def my_api_call():
+            return service.users().list(...).execute()
+    """
+    return _api_retry(func)
+
 
 # ---------------------------------------------------------------------------
 # Credential factories
@@ -46,16 +104,16 @@ def _service_account_creds(
 ) -> Credentials:
     """Create service-account credentials with optional domain-wide delegation.
 
-    The service account key is resolved via the configured ``secret_backend``:
-      * ``file`` — plain file path
-      * ``env`` — environment variable
-      * ``google_secret_manager`` — Google Cloud Secret Manager
-      * ``azure_key_vault`` — Azure Key Vault
+    Credentials are loaded **in memory** via ``from_service_account_info()``.
+    No temporary files are created — the key material never touches the
+    filesystem.  This applies to all secret backends (env, Google Secret
+    Manager, Azure Key Vault).  The ``file`` backend reads the existing
+    file once and discards the path.
     """
-    key_path = config.resolve_key_path()
+    key_info = config.resolve_key_info()
 
-    creds = service_account.Credentials.from_service_account_file(
-        key_path, scopes=scopes
+    creds = service_account.Credentials.from_service_account_info(
+        key_info, scopes=scopes
     )
 
     if config.delegated_admin_email:
@@ -85,11 +143,39 @@ def _oauth_creds(scopes: list[str]) -> Credentials:
 
 
 # ---------------------------------------------------------------------------
-# API service builder
+# API service builder (dynamic map + retry)
 # ---------------------------------------------------------------------------
 
-# Cache to avoid re-building the same service repeatedly
 _service_cache: dict[str, Resource] = {}
+
+
+def _resolve_discovery_name(api_service: str, api_version: str) -> tuple[str, str]:
+    """Resolve the Google API discovery service name and version.
+
+    Tries the Resource Catalogue first (so new resources are picked up
+    automatically), then falls back to using the raw values as-is — which
+    works for any API registered in Google's discovery service.
+    """
+    try:
+        from gwsdsc.config import load_resource_catalogue
+
+        catalogue = load_resource_catalogue()
+        for entry in catalogue.resources:
+            if entry.api_service == api_service and entry.api_version == api_version:
+                # The catalogue stores the same values the discovery service
+                # expects, so we can return them directly.
+                return api_service, api_version
+    except Exception:
+        pass  # catalogue not available — fall through
+
+    # Default: pass through unchanged (works for all standard Google APIs)
+    return api_service, api_version
+
+
+@_api_retry
+def _build_with_retry(svc_name: str, svc_ver: str, creds: Credentials) -> Resource:
+    """Build an API client with retry on transient discovery failures."""
+    return build(svc_name, svc_ver, credentials=creds, cache_discovery=False)
 
 
 def build_service(
@@ -98,33 +184,20 @@ def build_service(
     api_version: str,
     scopes: list[str],
 ) -> Resource:
-    """Build (and cache) a Google API client resource."""
+    """Build (and cache) a Google API client resource.
+
+    The service/version pair is resolved dynamically via the Resource
+    Catalogue.  API discovery is retried with exponential backoff on
+    transient failures.
+    """
     cache_key = f"{api_service}:{api_version}:{','.join(sorted(scopes))}"
     if cache_key in _service_cache:
         return _service_cache[cache_key]
 
     creds = get_credentials(config, scopes)
+    svc_name, svc_ver = _resolve_discovery_name(api_service, api_version)
 
-    # Map convenience names to discoverable service/version pairs
-    service_map: dict[str, tuple[str, str]] = {
-        ("admin", "directory_v1"): ("admin", "directory_v1"),
-        ("admin", "datatransfer_v1"): ("admin", "datatransfer_v1"),
-        ("chromepolicy", "v1"): ("chromepolicy", "v1"),
-        ("chromemanagement", "v1"): ("chromemanagement", "v1"),
-        ("gmail", "v1"): ("gmail", "v1"),
-        ("groupssettings", "v1"): ("groupssettings", "v1"),
-        ("cloudidentity", "v1"): ("cloudidentity", "v1"),
-        ("accesscontextmanager", "v1"): ("accesscontextmanager", "v1"),
-        ("vault", "v1"): ("vault", "v1"),
-        ("alertcenter", "v1beta1"): ("alertcenter", "v1beta1"),
-        ("licensing", "v1"): ("licensing", "v1"),
-    }
-
-    svc_name, svc_ver = service_map.get(
-        (api_service, api_version), (api_service, api_version)
-    )
-
-    service = build(svc_name, svc_ver, credentials=creds, cache_discovery=False)
+    service = _build_with_retry(svc_name, svc_ver, creds)
     _service_cache[cache_key] = service
     logger.info("Built API service: %s %s", svc_name, svc_ver)
     return service

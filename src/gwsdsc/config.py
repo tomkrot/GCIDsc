@@ -65,11 +65,15 @@ class CredentialsConfig(BaseModel):
             return os.environ.get(v.lstrip("$"), v)
         return v
 
-    def resolve_key_path(self) -> str:
-        """Resolve the service account key to a file path, using the configured backend."""
-        from gwsdsc.secrets import resolve_credentials_to_file
+    def resolve_key_info(self) -> dict:
+        """Resolve the service account key to an in-memory dict.
 
-        return resolve_credentials_to_file(self.model_dump())
+        No temporary files are created — the key material stays in memory
+        and is passed directly to ``from_service_account_info()``.
+        """
+        from gwsdsc.secrets import resolve_credentials
+
+        return resolve_credentials(self.model_dump())
 
 
 class StoreConfig(BaseModel):

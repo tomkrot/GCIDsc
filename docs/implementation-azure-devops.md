@@ -517,6 +517,14 @@ gwsdsc export --config config/tenant.yaml --resources ci_policies,ci_saml_sso_pr
 
 ## 11. Troubleshooting
 
+### Security Properties
+
+The framework provides the following security guarantees by design:
+
+- **No key material on disk**: Service account keys from Azure Key Vault (or any secret backend) are loaded directly into memory and passed to `google.oauth2.service_account.Credentials.from_service_account_info()`. No temporary files are created, so there is no risk of residual secrets on the pipeline agent's filesystem.
+- **Automatic retry**: All Google API calls (exports, imports, discovery) retry automatically with exponential backoff on HTTP 429 (rate limit) and 5xx (transient) errors. A pipeline will not fail because of a single API hiccup.
+- **Specific error handling**: Base64 decoding of Key Vault secrets logs precise failure reasons (`binascii.Error`, `UnicodeDecodeError`, `json.JSONDecodeError`) instead of swallowing errors silently.
+
 ### "403 Not Authorized" from Google APIs
 
 This almost always means domain-wide delegation is misconfigured. Verify the Client ID in the Admin Console matches the service account's numeric Unique ID (not the email). Also ensure the delegated admin email is a Super Admin and not suspended.

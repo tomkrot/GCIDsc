@@ -136,13 +136,28 @@ class BaseResource(ABC):
         raw = self.export_all()
         return [self.clean(item) for item in raw]
 
+    def _call_api(self, request):
+        """Execute a single API request with retry on 429/5xx errors.
+
+        All resource modules should use ``self._call_api(request)`` instead
+        of ``request.execute()`` directly so that transient failures are
+        handled uniformly with exponential backoff.
+        """
+        from gwsdsc.auth import with_retry
+
+        @with_retry
+        def _execute():
+            return request.execute()
+
+        return _execute()
+
     def _paginate(
         self,
         request,
         items_key: str,
         next_func=None,
     ) -> list[dict[str, Any]]:
-        """Generic pagination helper.
+        """Generic pagination helper with automatic retry.
 
         Parameters
         ----------
@@ -156,7 +171,7 @@ class BaseResource(ABC):
         """
         results: list[dict[str, Any]] = []
         while request is not None:
-            response = request.execute()
+            response = self._call_api(request)
             results.extend(response.get(items_key, []))
             if next_func:
                 request = next_func(request, response)
