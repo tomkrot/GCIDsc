@@ -1,0 +1,238 @@
+# ---------------------------------------------------------------------------
+# GoogleWorkspaceDsc — Azure DevOps Pipeline
+# ---------------------------------------------------------------------------
+# Provides:
+#   1. Scheduled nightly export (cron)
+#   2. Artifact commit + push to Git
+#   3. Diff against previous snapshot
+#   4. Drift report published as pipeline artifact
+#   5. Manual approval gate before apply
+#
+# Variables (set in Azure DevOps Library / Variable Group "gwsdsc"):
+#   GWS_DELEGATED_ADMIN       — admin email for domain-wide delegation
+#   GWS_CUSTOMER_ID           — Google Workspace customer ID
+#   GWS_PRIMARY_DOMAIN        — primary domain
+#   GWS_TENANT_NAME           — display name for reports
+#
+# Secrets (linked from Azure Key Vault):
+#   The variable group "gwsdsc" should be linked to an Azure Key Vault
+#   containing the service account key as a secret named "gwsdsc-sa-key".
+#   Alternatively, use a GCP Secret Manager reference in tenant.yaml.
+# ---------------------------------------------------------------------------
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - config/**
+      - src/**
+
+schedules:
+  - cron: "0 2 * * *"              # Every night at 02:00 UTC
+    displayName: "Nightly export"
+    branches:
+      include:
+        - main
+    always: true
+
+pr: none
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  - group: gwsdsc                   # Link your variable group (linked to Azure Key Vault)
+  - name: pythonVersion
+    value: "3.12"
+  - name: artifactsDir
+    value: "$(Build.SourcesDirectory)/artifacts"
+  - name: AZURE_VAULT_URL
+    value: "https://your-vault.vault.azure.net"   # Override in variable group
+
+stages:
+  # ===========================================================================
+  # Stage 1 — Export
+  # ===========================================================================
+  - stage: Export
+    displayName: "Export Google Workspace Configuration"
+    jobs:
+      - job: ExportJob
+        displayName: "Run gwsdsc export"
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "$(pythonVersion)"
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -e ".[azure]"
+            displayName: "Install gwsdsc (with Azure Key Vault support)"
+
+          - script: |
+              cat > config/tenant.yaml << 'EOF'
+              tenant_name: "$(GWS_TENANT_NAME)"
+              customer_id: "$(GWS_CUSTOMER_ID)"
+              primary_domain: "$(GWS_PRIMARY_DOMAIN)"
+              credentials:
+                type: service_account
+                secret_backend: azure_key_vault
+                azure_vault_url: "$(AZURE_VAULT_URL)"
+                azure_secret_name: "gwsdsc-sa-key"
+                delegated_admin_email: "$(GWS_DELEGATED_ADMIN)"
+              store:
+                type: git
+                path: artifacts
+                git_remote: origin
+                git_branch: main
+              resources:
+                - all
+              exclude_resources: []
+              EOF
+            displayName: "Generate tenant config (Azure Key Vault)"
+
+          - script: |
+              gwsdsc export --config config/tenant.yaml --output $(artifactsDir)/current
+            displayName: "Execute export"
+
+          - publish: $(artifactsDir)/current
+            artifact: gws-snapshot
+            displayName: "Publish snapshot artifact"
+
+  # ===========================================================================
+  # Stage 2 — Diff & Report
+  # ===========================================================================
+  - stage: Diff
+    displayName: "Differential Analysis & Drift Report"
+    dependsOn: Export
+    jobs:
+      - job: DiffJob
+        displayName: "Run gwsdsc diff"
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "$(pythonVersion)"
+
+          - script: pip install -e ".[dev]"
+            displayName: "Install gwsdsc"
+
+          - download: current
+            artifact: gws-snapshot
+            displayName: "Download current snapshot"
+
+          - script: |
+              # Determine previous snapshot from Git tags
+              PREV_TAG=$(git tag -l 'export/*' --sort=-creatordate | head -1)
+              if [ -z "$PREV_TAG" ]; then
+                echo "No previous export tag found. Skipping diff."
+                echo "##vso[task.setvariable variable=skipDiff]true"
+                exit 0
+              fi
+
+              # Checkout previous snapshot
+              git checkout "$PREV_TAG" -- artifacts/ 2>/dev/null || true
+              PREV_DIR="artifacts/previous"
+              mkdir -p "$PREV_DIR"
+              # Find the timestamped dir under artifacts
+              for d in artifacts/*/; do
+                if [ "$(basename "$d")" != "latest" ] && [ "$(basename "$d")" != "previous" ] && [ "$(basename "$d")" != "current" ]; then
+                  cp -r "$d"/* "$PREV_DIR/" 2>/dev/null || true
+                  break
+                fi
+              done
+
+              echo "##vso[task.setvariable variable=prevDir]$PREV_DIR"
+            displayName: "Resolve previous snapshot"
+
+          - script: |
+              if [ "$(skipDiff)" = "true" ]; then
+                echo "Skipping diff — no previous snapshot."
+                exit 0
+              fi
+              gwsdsc diff \
+                --baseline "$(prevDir)" \
+                --target "$(Pipeline.Workspace)/gws-snapshot" \
+                --report html \
+                --output "$(Build.ArtifactStagingDirectory)/drift-report.html"
+            displayName: "Run diff + generate report"
+
+          - publish: $(Build.ArtifactStagingDirectory)
+            artifact: drift-report
+            displayName: "Publish drift report"
+            condition: ne(variables.skipDiff, 'true')
+
+  # ===========================================================================
+  # Stage 3 — Commit to Git
+  # ===========================================================================
+  - stage: Commit
+    displayName: "Commit Snapshot to Repository"
+    dependsOn: Diff
+    jobs:
+      - job: CommitJob
+        displayName: "Git commit + tag"
+        steps:
+          - checkout: self
+            persistCredentials: true
+
+          - download: current
+            artifact: gws-snapshot
+
+          - script: |
+              TIMESTAMP=$(date -u +%Y-%m-%dT%H%M%SZ)
+              TARGET="artifacts/$TIMESTAMP"
+              mkdir -p "$TARGET"
+              cp -r "$(Pipeline.Workspace)/gws-snapshot/"* "$TARGET/"
+
+              # Update latest symlink
+              cd artifacts
+              rm -f latest
+              ln -s "$TIMESTAMP" latest
+              cd ..
+
+              git config user.email "gwsdsc-pipeline@devops.azure.com"
+              git config user.name "GoogleWorkspaceDsc Pipeline"
+              git add artifacts/
+              git commit -m "gwsdsc export $TIMESTAMP"
+              git tag "export/$TIMESTAMP"
+              git push origin HEAD:main --tags
+            displayName: "Commit and tag snapshot"
+
+  # ===========================================================================
+  # Stage 4 — Apply (manual gate)
+  # ===========================================================================
+  - stage: Apply
+    displayName: "Apply Configuration (Gated)"
+    dependsOn: Commit
+    condition: and(succeeded(), eq(variables['Build.Reason'], 'Manual'))
+    jobs:
+      - deployment: ApplyJob
+        displayName: "Apply with approval"
+        environment: "gws-production"          # ← Configure approval gate here
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: "$(pythonVersion)"
+
+                - script: pip install -e ".[azure]"
+                  displayName: "Install gwsdsc"
+
+                - download: current
+                  artifact: gws-snapshot
+
+                - script: |
+                    gwsdsc apply \
+                      --config config/tenant.yaml \
+                      --source "$(Pipeline.Workspace)/gws-snapshot" \
+                      --plan
+                  displayName: "Dry-run plan"
+
+                - script: |
+                    gwsdsc apply \
+                      --config config/tenant.yaml \
+                      --source "$(Pipeline.Workspace)/gws-snapshot" \
+                      --confirm
+                  displayName: "Apply changes"

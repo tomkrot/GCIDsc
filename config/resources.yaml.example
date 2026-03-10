@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# GoogleWorkspaceDsc — Resource Catalogue (optional override)
+# ---------------------------------------------------------------------------
+# You only need this file if you want to customise the built-in catalogue,
+# e.g. to disable specific resources or add custom ones.
+# The built-in catalogue is used if this file is not provided.
+# ---------------------------------------------------------------------------
+
+resources:
+  - name: customer
+    enabled: true
+    importable: true
+    description: "Customer / tenant-level settings"
+
+  - name: org_units
+    enabled: true
+    importable: true
+    description: "Organizational units"
+
+  - name: users
+    enabled: true
+    importable: true
+    description: "User accounts"
+
+  - name: groups
+    enabled: true
+    importable: true
+    description: "Groups and group settings"
+
+  - name: group_members
+    enabled: true
+    importable: true
+    description: "Group membership"
+
+  - name: roles
+    enabled: true
+    importable: true
+    description: "Admin roles"
+
+  - name: role_assignments
+    enabled: true
+    importable: true
+    description: "Role assignments"
+
+  - name: domains
+    enabled: true
+    importable: false
+    description: "Verified domains (read-only)"
+
+  - name: schemas
+    enabled: true
+    importable: true
+    description: "Custom user schemas"
+
+  - name: app_access
+    enabled: false                    # ← disabled — slow on large tenants
+    importable: false
+    description: "Third-party app tokens"
+
+  - name: chrome_policies
+    enabled: true
+    importable: true
+    description: "Chrome policies"
+
+  - name: email_settings
+    enabled: false                    # ← disabled by default (needs target_users)
+    importable: true
+    description: "Gmail settings"
+
+  - name: security
+    enabled: true
+    importable: false
+    description: "2SV posture"
+
+  - name: calendar_resources
+    enabled: true
+    importable: true
+    description: "Calendar resources (rooms)"
+
+  - name: mobile_devices
+    enabled: false                    # ← disabled by default
+    importable: false
+    description: "Mobile device inventory"

@@ -1,0 +1,163 @@
+# ---------------------------------------------------------------------------
+# GoogleWorkspaceDsc — Cloud Build: Export Pipeline
+# ---------------------------------------------------------------------------
+# Triggered by Cloud Scheduler (nightly) or manually.
+#
+# Required substitutions (set via trigger or --substitutions):
+#   _GWS_CUSTOMER_ID        — Google Workspace customer ID
+#   _GWS_PRIMARY_DOMAIN     — primary domain
+#   _GWS_TENANT_NAME        — display name
+#   _GWS_DELEGATED_ADMIN    — admin email
+#   _SA_KEY_SECRET           — Secret Manager secret name for SA key
+#   _ARTIFACT_BUCKET         — GCS bucket for snapshots
+#   _ARTIFACT_REPO           — Cloud Source Repo or GitHub repo name
+# ---------------------------------------------------------------------------
+
+timeout: "1800s"   # 30 minutes
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_MEDIUM
+
+steps:
+  # ─── Step 1: Install dependencies ───────────────────────────────────
+  - name: "python:3.12-slim"
+    id: install
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        pip install --no-cache-dir -e ".[dev]"
+        gwsdsc catalogue
+
+  # ─── Step 2: Retrieve service account key from Secret Manager ───────
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: get-secret
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        gcloud secrets versions access latest \
+          --secret="${_SA_KEY_SECRET}" \
+          --project="$PROJECT_ID" \
+          > /workspace/sa-key.json
+
+  # ─── Step 3: Generate tenant config ─────────────────────────────────
+  - name: "python:3.12-slim"
+    id: gen-config
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        cat > /workspace/config/tenant.yaml << EOF
+        tenant_name: "${_GWS_TENANT_NAME}"
+        customer_id: "${_GWS_CUSTOMER_ID}"
+        primary_domain: "${_GWS_PRIMARY_DOMAIN}"
+        credentials:
+          type: service_account
+          service_account_key_path: /workspace/sa-key.json
+          delegated_admin_email: "${_GWS_DELEGATED_ADMIN}"
+        store:
+          type: gcs
+          path: /workspace/artifacts
+          gcs_bucket: "${_ARTIFACT_BUCKET}"
+          gcs_prefix: "exports/"
+        resources:
+          - all
+        EOF
+
+  # ─── Step 4: Execute export ─────────────────────────────────────────
+  - name: "python:3.12-slim"
+    id: export
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        pip install -e . --quiet
+        TIMESTAMP=$(date -u +%Y-%m-%dT%H%M%SZ)
+        gwsdsc export \
+          --config /workspace/config/tenant.yaml \
+          --output /workspace/artifacts/$${TIMESTAMP}
+
+        # Save timestamp for subsequent steps
+        echo "$${TIMESTAMP}" > /workspace/.export-timestamp
+
+  # ─── Step 5: Upload to GCS ──────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/gsutil"
+    id: upload
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        TIMESTAMP=$(cat /workspace/.export-timestamp)
+        gsutil -m rsync -r \
+          /workspace/artifacts/$${TIMESTAMP}/ \
+          gs://${_ARTIFACT_BUCKET}/exports/$${TIMESTAMP}/
+        echo '{"latest_version":"'$${TIMESTAMP}'"}' | \
+          gsutil cp - gs://${_ARTIFACT_BUCKET}/exports/latest.json
+
+  # ─── Step 6: Diff against previous export ───────────────────────────
+  - name: "python:3.12-slim"
+    id: diff
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        pip install -e . --quiet
+        TIMESTAMP=$(cat /workspace/.export-timestamp)
+
+        # Find previous export
+        PREV=$(gsutil ls gs://${_ARTIFACT_BUCKET}/exports/ | \
+               grep -v latest | grep -v "$${TIMESTAMP}" | sort | tail -1 | \
+               sed 's|/$||' | xargs basename)
+
+        if [ -z "$PREV" ]; then
+          echo "No previous export found. Skipping diff."
+          exit 0
+        fi
+
+        # Download previous
+        mkdir -p /workspace/artifacts/previous
+        gsutil -m rsync -r \
+          gs://${_ARTIFACT_BUCKET}/exports/$${PREV}/ \
+          /workspace/artifacts/previous/
+
+        # Run diff
+        gwsdsc diff \
+          --baseline /workspace/artifacts/previous \
+          --target /workspace/artifacts/$${TIMESTAMP} \
+          --report html \
+          --output /workspace/drift-report.html
+
+        # Upload report
+        gsutil cp /workspace/drift-report.html \
+          gs://${_ARTIFACT_BUCKET}/reports/drift-report-$${TIMESTAMP}.html
+        gsutil cp /workspace/diff-result.json \
+          gs://${_ARTIFACT_BUCKET}/reports/diff-result-$${TIMESTAMP}.json
+
+  # ─── Step 7: Commit to Source Repository ────────────────────────────
+  - name: "gcr.io/cloud-builders/git"
+    id: git-commit
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        TIMESTAMP=$(cat /workspace/.export-timestamp)
+        cd /workspace
+
+        git config user.email "gwsdsc@cloudbuild.gserviceaccount.com"
+        git config user.name "GoogleWorkspaceDsc Cloud Build"
+
+        git add artifacts/ || true
+        git commit -m "gwsdsc export $${TIMESTAMP}" || echo "Nothing to commit"
+        git tag "export/$${TIMESTAMP}" || true
+        git push origin main --tags || echo "Push skipped (no remote configured)"
+
+substitutions:
+  _GWS_CUSTOMER_ID: "my_customer"
+  _GWS_PRIMARY_DOMAIN: "example.com"
+  _GWS_TENANT_NAME: "My Organisation"
+  _GWS_DELEGATED_ADMIN: "admin@example.com"
+  _SA_KEY_SECRET: "gwsdsc-sa-key"
+  _ARTIFACT_BUCKET: "gwsdsc-artifacts"
+  _ARTIFACT_REPO: "gwsdsc-config"

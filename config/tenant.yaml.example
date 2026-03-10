@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# GoogleWorkspaceDsc — Tenant Configuration
+# ---------------------------------------------------------------------------
+# Copy this file to config/tenant.yaml and fill in your values.
+# ---------------------------------------------------------------------------
+
+tenant_name: "My Organisation"
+customer_id: "my_customer"         # or your actual customer ID (e.g. C01234567)
+primary_domain: "example.com"
+
+# --- Authentication ---
+credentials:
+  type: service_account              # service_account | oauth | adc
+
+  # ┌────────────────────────────────────────────────────────────────┐
+  # │ Secret Backend — choose ONE of the following                   │
+  # └────────────────────────────────────────────────────────────────┘
+
+  # Option 1: Plain file (legacy — NOT recommended for CI/CD)
+  # secret_backend: file
+  # service_account_key_path: "$GWS_SA_KEY_PATH"
+
+  # Option 2: Environment variable (base64 or raw JSON)
+  # secret_backend: env
+  # secret_ref: "GWS_SA_KEY_JSON"         # env var name
+
+  # Option 3: Google Cloud Secret Manager (recommended for GCP pipelines)
+  secret_backend: google_secret_manager
+  secret_ref: "gwsdsc-sa-key"              # secret name (or full resource name)
+  google_project_id: "my-gcp-project"      # optional if running inside GCP
+  secret_version: "latest"
+
+  # Option 4: Azure Key Vault (recommended for Azure DevOps pipelines)
+  # secret_backend: azure_key_vault
+  # azure_vault_url: "https://my-vault.vault.azure.net"
+  # azure_secret_name: "gwsdsc-sa-key"
+  # azure_secret_version: ""               # empty = latest
+  # # Service principal auth (optional — DefaultAzureCredential used if omitted):
+  # azure_tenant_id: "xxxxxxxx-xxxx-..."
+  # azure_client_id: "xxxxxxxx-xxxx-..."
+  # azure_client_secret_env: "AZURE_CLIENT_SECRET"
+
+  delegated_admin_email: "admin@example.com"       # super-admin for DWD
+  # Extra scopes (merged with per-resource scopes automatically):
+  scopes: []
+
+# --- Artifact Storage ---
+store:
+  type: git                          # git | gcs | local
+  path: artifacts                    # local path for artifacts
+
+  # Git options (when type: git)
+  git_remote: origin                 # set to null to skip push
+  git_branch: main
+  git_commit_message_template: "gwsdsc export {timestamp}"
+
+  # GCS options (when type: gcs)
+  # gcs_bucket: gwsdsc-artifacts
+  # gcs_prefix: "exports/"
+
+# --- Resources to export ---
+resources:
+  - all                              # or list specific: [users, groups, org_units]
+
+exclude_resources:
+  # - mobile_devices                 # skip if not needed
+  # - app_access                     # can be slow on large tenants
+
+# --- Per-resource export options ---
+export_options:
+  users:
+    include_suspended: true
+    projection: full                 # full | basic | custom
+  app_access:
+    max_users: 500                   # limit for third-party token scan
+  email_settings:
+    target_users: []                 # list of user emails to export Gmail settings for
+  groups:
+    include_settings: true           # also fetch Groups Settings API data

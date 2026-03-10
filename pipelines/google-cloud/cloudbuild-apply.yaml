@@ -1,0 +1,114 @@
+# ---------------------------------------------------------------------------
+# GoogleWorkspaceDsc — Cloud Build: Apply Pipeline
+# ---------------------------------------------------------------------------
+# Triggered manually (requires manual approval via Cloud Deploy or a
+# Cloud Build trigger with required approval).
+# ---------------------------------------------------------------------------
+
+timeout: "1800s"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - name: "python:3.12-slim"
+    id: install
+    entrypoint: bash
+    args:
+      - "-c"
+      - pip install --no-cache-dir -e ".[dev]"
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: get-secret
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        gcloud secrets versions access latest \
+          --secret="${_SA_KEY_SECRET}" \
+          --project="$PROJECT_ID" > /workspace/sa-key.json
+
+  - name: "python:3.12-slim"
+    id: gen-config
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        cat > /workspace/config/tenant.yaml << EOF
+        tenant_name: "${_GWS_TENANT_NAME}"
+        customer_id: "${_GWS_CUSTOMER_ID}"
+        primary_domain: "${_GWS_PRIMARY_DOMAIN}"
+        credentials:
+          type: service_account
+          service_account_key_path: /workspace/sa-key.json
+          delegated_admin_email: "${_GWS_DELEGATED_ADMIN}"
+        store:
+          type: gcs
+          path: /workspace/artifacts
+          gcs_bucket: "${_ARTIFACT_BUCKET}"
+          gcs_prefix: "exports/"
+        resources:
+          - all
+        EOF
+
+  # Download the snapshot to apply
+  - name: "gcr.io/cloud-builders/gsutil"
+    id: download-snapshot
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        # Use specified version or latest
+        if [ -n "${_APPLY_VERSION}" ]; then
+          VERSION="${_APPLY_VERSION}"
+        else
+          VERSION=$(gsutil cat gs://${_ARTIFACT_BUCKET}/exports/latest.json | \
+                    python3 -c "import sys,json; print(json.load(sys.stdin)['latest_version'])")
+        fi
+        echo "Applying version: $${VERSION}"
+        echo "$${VERSION}" > /workspace/.apply-version
+
+        mkdir -p /workspace/apply-source
+        gsutil -m rsync -r \
+          gs://${_ARTIFACT_BUCKET}/exports/$${VERSION}/ \
+          /workspace/apply-source/
+
+  # Dry-run plan
+  - name: "python:3.12-slim"
+    id: plan
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        pip install -e . --quiet
+        gwsdsc apply \
+          --config /workspace/config/tenant.yaml \
+          --source /workspace/apply-source \
+          --plan
+
+  # Apply (only if _CONFIRM is set to "true")
+  - name: "python:3.12-slim"
+    id: apply
+    entrypoint: bash
+    args:
+      - "-c"
+      - |
+        if [ "${_CONFIRM}" != "true" ]; then
+          echo "Dry-run only. Set _CONFIRM=true to apply."
+          exit 0
+        fi
+        pip install -e . --quiet
+        gwsdsc apply \
+          --config /workspace/config/tenant.yaml \
+          --source /workspace/apply-source \
+          --confirm
+
+substitutions:
+  _GWS_CUSTOMER_ID: "my_customer"
+  _GWS_PRIMARY_DOMAIN: "example.com"
+  _GWS_TENANT_NAME: "My Organisation"
+  _GWS_DELEGATED_ADMIN: "admin@example.com"
+  _SA_KEY_SECRET: "gwsdsc-sa-key"
+  _ARTIFACT_BUCKET: "gwsdsc-artifacts"
+  _APPLY_VERSION: ""         # Leave empty for latest
+  _CONFIRM: "false"          # Set to "true" to actually apply
