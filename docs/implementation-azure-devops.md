@@ -190,22 +190,70 @@ Choose a Super Admin account that the service account will impersonate, for exam
 
 ### 3.7 Local Smoke Test
 
-Before wiring up Azure, verify the SA key works locally:
+Before wiring up Azure DevOps infrastructure, verify that the service account key works by running a test export on your local workstation. This requires Python and the framework code — nothing from Azure is involved yet.
+
+**Step A — Get the framework code onto your local machine:**
+
+If you already have the code in an Azure DevOps repository:
 
 ```bash
-# Install gwsdsc locally
+# Clone from Azure Repos (HTTPS)
+git clone https://dev.azure.com/YOUR_ORG/GoogleWorkspaceDsc/_git/GoogleWorkspaceDsc
 cd GoogleWorkspaceDsc
-pip install -e .
+```
 
-# Create a minimal test config
-cat > /tmp/test-tenant.yaml << EOF
+If the code is not yet in a repository, simply unzip the framework archive into a local directory:
+
+```bash
+unzip GoogleWorkspaceDsc.zip
+cd GoogleWorkspaceDsc
+```
+
+**Step B — Install the framework into a Python virtual environment:**
+
+This downloads all dependencies (google-api-python-client, tenacity, etc.) from PyPI and registers the `gwsdsc` command on your PATH.
+
+Linux / macOS:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Windows (PowerShell):
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+```
+
+Verify the installation:
+
+```bash
+gwsdsc catalogue
+```
+
+This should print a table of all 32 resource modules. If it does, the framework is installed correctly.
+
+**Step C — Create a minimal test config and run the export:**
+
+At this point you still have the `sa-key.json` file on disk from step 3.3 (you'll upload it to Key Vault and delete it in Phase 2). Use it directly for this one-time test.
+
+Linux / macOS:
+
+```bash
+mkdir -p /tmp/gwsdsc-test
+
+cat > /tmp/test-tenant.yaml << 'EOF'
 tenant_name: "Smoke Test"
 customer_id: "my_customer"
 primary_domain: "yourdomain.com"
 credentials:
   type: service_account
   secret_backend: file
-  service_account_key_path: "$(pwd)/sa-key.json"
+  service_account_key_path: "sa-key.json"
   delegated_admin_email: "admin@yourdomain.com"
 store:
   type: local
@@ -215,11 +263,58 @@ resources:
   - org_units
 EOF
 
-# Run a minimal export
 gwsdsc export --config /tmp/test-tenant.yaml
 ```
 
-If this produces JSON files under `/tmp/gwsdsc-test/`, the Google side is working correctly.
+Windows (PowerShell):
+
+```powershell
+New-Item -ItemType Directory -Path $env:TEMP\gwsdsc-test -Force | Out-Null
+
+@"
+tenant_name: "Smoke Test"
+customer_id: "my_customer"
+primary_domain: "yourdomain.com"
+credentials:
+  type: service_account
+  secret_backend: file
+  service_account_key_path: "sa-key.json"
+  delegated_admin_email: "admin@yourdomain.com"
+store:
+  type: local
+  path: "$env:TEMP\gwsdsc-test"
+resources:
+  - customer
+  - org_units
+"@ | Set-Content -Path $env:TEMP\test-tenant.yaml -Encoding utf8
+
+gwsdsc export --config $env:TEMP\test-tenant.yaml
+```
+
+**Step D — Verify the output:**
+
+```bash
+# Linux / macOS
+ls /tmp/gwsdsc-test/*/
+cat /tmp/gwsdsc-test/*/customer.json
+```
+
+```powershell
+# Windows
+Get-ChildItem $env:TEMP\gwsdsc-test -Recurse -Filter *.json
+Get-Content (Get-ChildItem $env:TEMP\gwsdsc-test -Recurse -Filter customer.json).FullName
+```
+
+If you see JSON files with your tenant's customer record and org units, the Google side is working correctly. You can now proceed to set up Azure Key Vault.
+
+**Step E — Clean up the virtual environment (optional):**
+
+The smoke test venv is only needed for this one-time validation. The pipeline installs gwsdsc on the agent independently.
+
+```bash
+deactivate                  # exit the venv
+rm -rf .venv                # remove it
+```
 
 ---
 
