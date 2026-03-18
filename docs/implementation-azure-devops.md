@@ -50,7 +50,9 @@
                     └─────────────────────┘
 ```
 
-The nightly cycle runs as follows: Cloud Scheduler (cron in the YAML pipeline) triggers a build. The pipeline reads the Google service account key from Azure Key Vault, exports all 21 resource modules via the Google APIs, commits the JSON artifacts to Git, diffs against the previous snapshot, and publishes an HTML drift report. Applying changes to a target tenant is a separate, manually-triggered stage with an approval gate.
+The nightly cycle runs as follows: Cloud Scheduler (cron in the YAML pipeline) triggers a build. The pipeline reads the Google service account key from Azure Key Vault, exports all 32 resource modules via the Google APIs, commits the JSON artifacts to Git, diffs against the previous snapshot, and publishes an HTML drift report. Applying changes to a target tenant is a separate, manually-triggered stage with an approval gate.
+
+All pipeline steps use **PowerShell Core** (`pwsh:`), so the pipeline runs identically on Linux hosted agents, Windows hosted agents, and Windows Server self-hosted agents. No symlinks, bash, or Unix-specific tools are used.
 
 ---
 
@@ -86,6 +88,19 @@ Before you begin, confirm you have the following accounts and permissions.
 | gcloud CLI | latest | Google Cloud project setup |
 | az CLI | 2.50+ | Azure resource setup |
 | Terraform (optional) | 1.5+ | If you want to IaC the Azure resources too |
+
+### 2.4 Self-Hosted Agent (if applicable)
+
+The pipeline supports both **Linux** and **Windows** self-hosted agents. If using a Windows agent, ensure:
+
+| Requirement | Detail |
+|---|---|
+| Python 3.10+ | Installed and on the PATH |
+| Git for Windows | Installed (`git.exe` on PATH) |
+| PowerShell Core 7+ | Pre-installed on modern Windows Server; the pipeline uses `pwsh:` steps |
+| Network access | Outbound HTTPS to `*.googleapis.com`, `*.vault.azure.net`, and PyPI |
+
+No bash, no symlinks, no Unix utilities are required. All pipeline steps use PowerShell Core which is cross-platform.
 
 ---
 
@@ -236,21 +251,27 @@ az keyvault create \
 
 The service account key JSON must be stored as a Key Vault secret. Since Key Vault secrets are plain strings, base64-encode the JSON first (gwsdsc auto-detects and decodes base64 at runtime).
 
+**Linux / macOS:**
 ```bash
-# Encode the key
 BASE64_KEY=$(base64 -w0 sa-key.json)
-
-# Store in Key Vault
 az keyvault secret set \
   --vault-name kv-gwsdsc \
   --name gwsdsc-sa-key \
   --value "$BASE64_KEY"
+```
 
-# Verify
-az keyvault secret show \
-  --vault-name kv-gwsdsc \
-  --name gwsdsc-sa-key \
-  --query "id" -o tsv
+**Windows (PowerShell):**
+```powershell
+$base64Key = [Convert]::ToBase64String([IO.File]::ReadAllBytes("sa-key.json"))
+az keyvault secret set `
+  --vault-name kv-gwsdsc `
+  --name gwsdsc-sa-key `
+  --value $base64Key
+```
+
+Verify:
+```bash
+az keyvault secret show --vault-name kv-gwsdsc --name gwsdsc-sa-key --query "id" -o tsv
 ```
 
 ### 4.4 Create an Azure AD App Registration (Service Principal)
@@ -280,9 +301,24 @@ Save the output — you will need `appId`, `password`, and `tenant` for the Azur
 
 Now that the key is safely in Key Vault, remove it from your local machine:
 
+**Linux:**
 ```bash
-shred -u sa-key.json   # Linux
-# or: rm -P sa-key.json  # macOS
+shred -u sa-key.json
+```
+
+**macOS:**
+```bash
+rm -P sa-key.json
+```
+
+**Windows (PowerShell):**
+```powershell
+# Overwrite with random data before deletion
+$path = "sa-key.json"
+$bytes = [byte[]]::new((Get-Item $path).Length)
+(New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
+[IO.File]::WriteAllBytes($path, $bytes)
+Remove-Item $path -Force
 ```
 
 ---
@@ -477,17 +513,18 @@ gcloud iam service-accounts keys create new-sa-key.json \
   --iam-account=$SA_EMAIL
 
 # Upload to Key Vault (creates a new version)
-az keyvault secret set \
-  --vault-name kv-gwsdsc \
-  --name gwsdsc-sa-key \
+# Linux/macOS:
+az keyvault secret set --vault-name kv-gwsdsc --name gwsdsc-sa-key \
   --value "$(base64 -w0 new-sa-key.json)"
+# Windows PowerShell:
+# $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes("new-sa-key.json"))
+# az keyvault secret set --vault-name kv-gwsdsc --name gwsdsc-sa-key --value $b64
 
 # Delete old key from GCP (after confirming the new one works)
 gcloud iam service-accounts keys list --iam-account=$SA_EMAIL
 gcloud iam service-accounts keys delete OLD_KEY_ID --iam-account=$SA_EMAIL
 
-# Clean up
-shred -u new-sa-key.json
+# Clean up local file (Linux: shred -u / Windows: Remove-Item)
 ```
 
 ### 10.2 Comparing Specific Snapshots
@@ -540,6 +577,18 @@ The Commit stage uses `persistCredentials: true` on the checkout step. If pushes
 ### "No module named gwsdsc"
 
 Ensure `pip install -e ".[azure]"` ran successfully in the Install step. Check the pipeline log for pip errors (network issues, Python version mismatch).
+
+### Windows Self-Hosted Agents
+
+The framework and pipeline run on both Linux and Windows agents. The pipeline uses **PowerShell Core** (`pwsh:`) for all script steps, which is cross-platform. When configuring the pipeline, set the `agentPool` parameter to your self-hosted pool name.
+
+Key points for Windows agents:
+
+- Python 3.10+ must be installed and on the PATH (or use `UsePythonVersion@0`).
+- Git for Windows must be installed.
+- PowerShell Core (pwsh 7+) must be installed — it is pre-installed on Azure DevOps hosted images and most modern Windows servers.
+- No symlinks are used — the framework writes a `latest.json` pointer file instead, which is fully cross-platform.
+- No bash, no `base64` CLI, no `shred` — all secret handling is done in-memory by the Python framework.
 
 ### Export Takes Too Long
 

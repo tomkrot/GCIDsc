@@ -1,24 +1,30 @@
 # ---------------------------------------------------------------------------
-# GoogleWorkspaceDsc — Azure DevOps Pipeline
+# GoogleWorkspaceDsc — Azure DevOps Pipeline (Cross-Platform)
 # ---------------------------------------------------------------------------
-# Provides:
-#   1. Scheduled nightly export (cron)
-#   2. Artifact commit + push to Git
-#   3. Diff against previous snapshot
-#   4. Drift report published as pipeline artifact
-#   5. Manual approval gate before apply
+# Uses PowerShell Core (pwsh) for all script steps, which runs identically
+# on both Linux and Windows self-hosted agents.
 #
 # Variables (set in Azure DevOps Library / Variable Group "gwsdsc"):
 #   GWS_DELEGATED_ADMIN       — admin email for domain-wide delegation
 #   GWS_CUSTOMER_ID           — Google Workspace customer ID
 #   GWS_PRIMARY_DOMAIN        — primary domain
 #   GWS_TENANT_NAME           — display name for reports
+#   AZURE_VAULT_URL           — https://your-vault.vault.azure.net
 #
 # Secrets (linked from Azure Key Vault):
 #   The variable group "gwsdsc" should be linked to an Azure Key Vault
 #   containing the service account key as a secret named "gwsdsc-sa-key".
-#   Alternatively, use a GCP Secret Manager reference in tenant.yaml.
 # ---------------------------------------------------------------------------
+
+parameters:
+  - name: agentPool
+    displayName: "Agent pool"
+    type: string
+    default: "ubuntu-latest"
+    values:
+      - ubuntu-latest
+      - windows-latest
+      - Default            # self-hosted pool name
 
 trigger:
   branches:
@@ -30,7 +36,7 @@ trigger:
       - src/**
 
 schedules:
-  - cron: "0 2 * * *"              # Every night at 02:00 UTC
+  - cron: "0 2 * * *"
     displayName: "Nightly export"
     branches:
       include:
@@ -40,16 +46,14 @@ schedules:
 pr: none
 
 pool:
-  vmImage: "ubuntu-latest"
+  vmImage: ${{ parameters.agentPool }}
 
 variables:
-  - group: gwsdsc                   # Link your variable group (linked to Azure Key Vault)
+  - group: gwsdsc
   - name: pythonVersion
     value: "3.12"
   - name: artifactsDir
     value: "$(Build.SourcesDirectory)/artifacts"
-  - name: AZURE_VAULT_URL
-    value: "https://your-vault.vault.azure.net"   # Override in variable group
 
 stages:
   # ===========================================================================
@@ -65,13 +69,13 @@ stages:
             inputs:
               versionSpec: "$(pythonVersion)"
 
-          - script: |
+          - pwsh: |
               python -m pip install --upgrade pip
               pip install -e ".[azure]"
             displayName: "Install gwsdsc (with Azure Key Vault support)"
 
-          - script: |
-              cat > config/tenant.yaml << 'EOF'
+          - pwsh: |
+              $config = @"
               tenant_name: "$(GWS_TENANT_NAME)"
               customer_id: "$(GWS_CUSTOMER_ID)"
               primary_domain: "$(GWS_PRIMARY_DOMAIN)"
@@ -89,11 +93,13 @@ stages:
               resources:
                 - all
               exclude_resources: []
-              EOF
-            displayName: "Generate tenant config (Azure Key Vault)"
+              "@
+              New-Item -ItemType Directory -Path config -Force | Out-Null
+              $config | Set-Content -Path config/tenant.yaml -Encoding utf8
+            displayName: "Generate tenant config"
 
-          - script: |
-              gwsdsc export --config config/tenant.yaml --output $(artifactsDir)/current
+          - pwsh: |
+              gwsdsc export --config config/tenant.yaml --output "$(artifactsDir)/current"
             displayName: "Execute export"
 
           - publish: $(artifactsDir)/current
@@ -114,46 +120,48 @@ stages:
             inputs:
               versionSpec: "$(pythonVersion)"
 
-          - script: pip install -e ".[dev]"
+          - pwsh: |
+              pip install -e ".[dev]"
             displayName: "Install gwsdsc"
 
           - download: current
             artifact: gws-snapshot
             displayName: "Download current snapshot"
 
-          - script: |
-              # Determine previous snapshot from Git tags
-              PREV_TAG=$(git tag -l 'export/*' --sort=-creatordate | head -1)
-              if [ -z "$PREV_TAG" ]; then
-                echo "No previous export tag found. Skipping diff."
-                echo "##vso[task.setvariable variable=skipDiff]true"
+          - pwsh: |
+              # Find the previous export tag
+              $prevTag = git tag -l 'export/*' --sort=-creatordate | Select-Object -First 1
+              if (-not $prevTag) {
+                Write-Host "No previous export tag found. Skipping diff."
+                Write-Host "##vso[task.setvariable variable=skipDiff]true"
                 exit 0
-              fi
+              }
 
               # Checkout previous snapshot
-              git checkout "$PREV_TAG" -- artifacts/ 2>/dev/null || true
-              PREV_DIR="artifacts/previous"
-              mkdir -p "$PREV_DIR"
-              # Find the timestamped dir under artifacts
-              for d in artifacts/*/; do
-                if [ "$(basename "$d")" != "latest" ] && [ "$(basename "$d")" != "previous" ] && [ "$(basename "$d")" != "current" ]; then
-                  cp -r "$d"/* "$PREV_DIR/" 2>/dev/null || true
-                  break
-                fi
-              done
+              git checkout $prevTag -- artifacts/ 2>$null
+              $prevDir = "artifacts/previous"
+              New-Item -ItemType Directory -Path $prevDir -Force | Out-Null
 
-              echo "##vso[task.setvariable variable=prevDir]$PREV_DIR"
+              # Find the timestamped snapshot directory
+              Get-ChildItem -Path artifacts -Directory |
+                Where-Object { $_.Name -notin @('latest','previous','current') } |
+                Select-Object -First 1 |
+                ForEach-Object {
+                  Copy-Item -Path (Join-Path $_.FullName '*') -Destination $prevDir -Recurse -Force
+                }
+
+              Write-Host "##vso[task.setvariable variable=prevDir]$prevDir"
             displayName: "Resolve previous snapshot"
 
-          - script: |
-              if [ "$(skipDiff)" = "true" ]; then
-                echo "Skipping diff — no previous snapshot."
+          - pwsh: |
+              if ("$(skipDiff)" -eq "true") {
+                Write-Host "Skipping diff — no previous snapshot."
                 exit 0
-              fi
-              gwsdsc diff \
-                --baseline "$(prevDir)" \
-                --target "$(Pipeline.Workspace)/gws-snapshot" \
-                --report html \
+              }
+              gwsdsc diff `
+                --baseline "$(prevDir)" `
+                --target "$(Pipeline.Workspace)/gws-snapshot" `
+                --report html `
                 --output "$(Build.ArtifactStagingDirectory)/drift-report.html"
             displayName: "Run diff + generate report"
 
@@ -178,23 +186,21 @@ stages:
           - download: current
             artifact: gws-snapshot
 
-          - script: |
-              TIMESTAMP=$(date -u +%Y-%m-%dT%H%M%SZ)
-              TARGET="artifacts/$TIMESTAMP"
-              mkdir -p "$TARGET"
-              cp -r "$(Pipeline.Workspace)/gws-snapshot/"* "$TARGET/"
+          - pwsh: |
+              $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHHmmss'Z'")
+              $target = "artifacts/$timestamp"
+              New-Item -ItemType Directory -Path $target -Force | Out-Null
+              Copy-Item -Path "$(Pipeline.Workspace)/gws-snapshot/*" -Destination $target -Recurse
 
-              # Update latest symlink
-              cd artifacts
-              rm -f latest
-              ln -s "$TIMESTAMP" latest
-              cd ..
+              # Write latest.json pointer (cross-platform, no symlinks)
+              @{ path = (Resolve-Path $target).Path; name = $timestamp } |
+                ConvertTo-Json | Set-Content -Path "artifacts/latest.json" -Encoding utf8
 
               git config user.email "gwsdsc-pipeline@devops.azure.com"
               git config user.name "GoogleWorkspaceDsc Pipeline"
               git add artifacts/
-              git commit -m "gwsdsc export $TIMESTAMP"
-              git tag "export/$TIMESTAMP"
+              git commit -m "gwsdsc export $timestamp"
+              git tag "export/$timestamp"
               git push origin HEAD:main --tags
             displayName: "Commit and tag snapshot"
 
@@ -208,7 +214,7 @@ stages:
     jobs:
       - deployment: ApplyJob
         displayName: "Apply with approval"
-        environment: "gws-production"          # ← Configure approval gate here
+        environment: "gws-production"
         strategy:
           runOnce:
             deploy:
@@ -217,22 +223,23 @@ stages:
                   inputs:
                     versionSpec: "$(pythonVersion)"
 
-                - script: pip install -e ".[azure]"
+                - pwsh: |
+                    pip install -e ".[azure]"
                   displayName: "Install gwsdsc"
 
                 - download: current
                   artifact: gws-snapshot
 
-                - script: |
-                    gwsdsc apply \
-                      --config config/tenant.yaml \
-                      --source "$(Pipeline.Workspace)/gws-snapshot" \
+                - pwsh: |
+                    gwsdsc apply `
+                      --config config/tenant.yaml `
+                      --source "$(Pipeline.Workspace)/gws-snapshot" `
                       --plan
                   displayName: "Dry-run plan"
 
-                - script: |
-                    gwsdsc apply \
-                      --config config/tenant.yaml \
-                      --source "$(Pipeline.Workspace)/gws-snapshot" \
+                - pwsh: |
+                    gwsdsc apply `
+                      --config config/tenant.yaml `
+                      --source "$(Pipeline.Workspace)/gws-snapshot" `
                       --confirm
                   displayName: "Apply changes"

@@ -52,10 +52,10 @@ It treats tenant settings as *code*, enabling:
 
 ### Pipeline Options
 
-| Option | Stack | Scheduling | Artifact Store |
+| Option | Stack | Scheduling | Agent OS |
 |---|---|---|---|
-| **A — Azure DevOps** | Azure Pipelines + Git (Azure Repos / GitHub) | Cron trigger in YAML pipeline | Git commits in repo |
-| **B — Google Cloud** | Cloud Build + Cloud Scheduler + GCS / Cloud Source Repos | Cloud Scheduler → Cloud Build trigger | Git commits *or* GCS versioned bucket |
+| **A — Azure DevOps** | Azure Pipelines + Git (Azure Repos / GitHub) | Cron trigger in YAML pipeline | **Linux or Windows** (PowerShell Core) |
+| **B — Google Cloud** | Cloud Build + Cloud Scheduler + GCS / Cloud Source Repos | Cloud Scheduler → Cloud Build trigger | Linux (Cloud Build workers) |
 
 ---
 

@@ -115,11 +115,8 @@ class ExportEngine:
             json.dumps(snapshot, indent=2, default=str, ensure_ascii=False)
         )
 
-        # Maintain a "latest" symlink
-        latest = Path(self.config.store.path) / "latest"
-        if latest.is_symlink() or latest.exists():
-            latest.unlink()
-        latest.symlink_to(out.resolve())
+        # Maintain a "latest" pointer (cross-platform — no symlinks)
+        _write_latest_pointer(Path(self.config.store.path), out)
 
         logger.info(
             "Export complete: %d resources, %d errors, output=%s",
@@ -144,3 +141,40 @@ class ExportEngine:
         excluded = set(self.config.exclude_resources)
         names = [n for n in names if n not in excluded]
         return sorted(names)
+
+
+# ---------------------------------------------------------------------------
+# Cross-platform "latest" pointer (replaces symlinks)
+# ---------------------------------------------------------------------------
+
+
+def _write_latest_pointer(store_path: Path, snapshot_dir: Path) -> None:
+    """Write a ``latest.json`` pointer file instead of a symlink.
+
+    Symlinks require Developer Mode or admin privileges on Windows and
+    behave inconsistently in Git across platforms.  A JSON pointer is
+    universally portable.
+    """
+    pointer = store_path / "latest.json"
+    pointer.write_text(json.dumps({
+        "path": str(snapshot_dir.resolve()),
+        "name": snapshot_dir.name,
+    }, indent=2))
+
+
+def resolve_latest(store_path: str | Path) -> Path | None:
+    """Resolve the latest snapshot directory from the ``latest.json`` pointer.
+
+    Returns ``None`` if no pointer exists or the target directory is missing.
+    """
+    pointer = Path(store_path) / "latest.json"
+    if not pointer.exists():
+        return None
+    try:
+        data = json.loads(pointer.read_text())
+        target = Path(data["path"])
+        if target.is_dir():
+            return target
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
