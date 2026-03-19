@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GoogleWorkspaceDsc — Architecture Diagram</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=DM+Sans:wght@400;500;700&display=swap');
+  
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  
+  body {
+    font-family: 'DM Sans', system-ui, sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 2rem;
+  }
+  
+  h1 {
+    text-align: center;
+    font-size: 1.8rem;
+    font-weight: 700;
+    margin-bottom: 0.3rem;
+    background: linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  
+  .subtitle {
+    text-align: center;
+    color: #64748b;
+    font-size: 0.95rem;
+    margin-bottom: 2rem;
+  }
+  
+  .diagram {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+  
+  .layer {
+    border-radius: 16px;
+    padding: 1.2rem 1.5rem 1.5rem;
+    position: relative;
+  }
+  
+  .layer-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 0.8rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  
+  .layer-label .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  
+  .boxes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+  
+  .box {
+    border-radius: 10px;
+    padding: 0.65rem 1rem;
+    font-size: 0.82rem;
+    font-weight: 500;
+    position: relative;
+    transition: transform 0.15s, box-shadow 0.15s;
+    cursor: default;
+    min-width: 100px;
+    text-align: center;
+  }
+  
+  .box:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+  }
+  
+  .box small {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 400;
+    opacity: 0.7;
+    margin-top: 2px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  
+  /* Layer: Google Workspace Tenant */
+  .l-tenant { background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.2); }
+  .l-tenant .layer-label { color: #60a5fa; }
+  .l-tenant .dot { background: #60a5fa; }
+  .l-tenant .box { background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.25); color: #93c5fd; }
+  
+  /* Layer: Auth & Secrets */
+  .l-auth { background: rgba(139, 92, 246, 0.08); border: 1px solid rgba(139, 92, 246, 0.2); }
+  .l-auth .layer-label { color: #a78bfa; }
+  .l-auth .dot { background: #a78bfa; }
+  .l-auth .box { background: rgba(139, 92, 246, 0.12); border: 1px solid rgba(139, 92, 246, 0.25); color: #c4b5fd; }
+  
+  /* Layer: Secret Backends */
+  .l-secrets { background: rgba(245, 158, 11, 0.06); border: 1px solid rgba(245, 158, 11, 0.15); }
+  .l-secrets .layer-label { color: #fbbf24; }
+  .l-secrets .dot { background: #fbbf24; }
+  .l-secrets .box { background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.2); color: #fcd34d; }
+  
+  /* Layer: Resources */
+  .l-resources { background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.2); }
+  .l-resources .layer-label { color: #4ade80; }
+  .l-resources .dot { background: #4ade80; }
+  .l-resources .box { background: rgba(34, 197, 94, 0.10); border: 1px solid rgba(34, 197, 94, 0.25); color: #86efac; }
+  .l-resources .box.readonly { opacity: 0.65; border-style: dashed; }
+  
+  /* Layer: Engines */
+  .l-engines { background: rgba(244, 114, 182, 0.08); border: 1px solid rgba(244, 114, 182, 0.2); }
+  .l-engines .layer-label { color: #f472b6; }
+  .l-engines .dot { background: #f472b6; }
+  .l-engines .box { background: rgba(244, 114, 182, 0.10); border: 1px solid rgba(244, 114, 182, 0.25); color: #f9a8d4; }
+  
+  /* Layer: Store */
+  .l-store { background: rgba(6, 182, 212, 0.08); border: 1px solid rgba(6, 182, 212, 0.2); }
+  .l-store .layer-label { color: #22d3ee; }
+  .l-store .dot { background: #22d3ee; }
+  .l-store .box { background: rgba(6, 182, 212, 0.10); border: 1px solid rgba(6, 182, 212, 0.25); color: #67e8f9; }
+  
+  /* Layer: Pipelines */
+  .l-pipeline { background: rgba(100, 116, 139, 0.08); border: 1px solid rgba(100, 116, 139, 0.2); }
+  .l-pipeline .layer-label { color: #94a3b8; }
+  .l-pipeline .dot { background: #94a3b8; }
+  
+  .pipeline-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+  }
+  
+  .pipe-col {
+    border-radius: 10px;
+    padding: 0.8rem 1rem;
+  }
+  
+  .pipe-azure { background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.15); }
+  .pipe-azure .pipe-title { color: #60a5fa; font-weight: 600; font-size: 0.82rem; margin-bottom: 0.5rem; }
+  
+  .pipe-gcp { background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.15); }
+  .pipe-gcp .pipe-title { color: #4ade80; font-weight: 600; font-size: 0.82rem; margin-bottom: 0.5rem; }
+  
+  .pipe-steps {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  
+  .pipe-step {
+    font-size: 0.72rem;
+    padding: 0.3rem 0.6rem;
+    border-radius: 6px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  
+  .pipe-azure .pipe-step { background: rgba(59, 130, 246, 0.15); color: #93c5fd; }
+  .pipe-gcp .pipe-step { background: rgba(34, 197, 94, 0.12); color: #86efac; }
+  
+  .pipe-step.gate { background: rgba(239, 68, 68, 0.15); color: #fca5a5; border: 1px dashed rgba(239, 68, 68, 0.3); }
+  
+  .arrow-sym {
+    color: #475569;
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+  
+  /* Flow arrows between layers */
+  .flow {
+    display: flex;
+    justify-content: center;
+    gap: 3rem;
+    margin: -0.4rem 0;
+    position: relative;
+    z-index: 1;
+  }
+  
+  .flow-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-size: 0.7rem;
+    color: #64748b;
+    font-family: 'JetBrains Mono', monospace;
+    gap: 0;
+  }
+  
+  .flow-arrow .shaft {
+    width: 2px;
+    height: 18px;
+    background: linear-gradient(to bottom, transparent, #475569);
+  }
+  
+  .flow-arrow .head {
+    width: 0; height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid #475569;
+  }
+
+  .legend {
+    margin-top: 1.5rem;
+    padding: 1rem 1.5rem;
+    border-radius: 12px;
+    background: rgba(100, 116, 139, 0.06);
+    border: 1px solid rgba(100, 116, 139, 0.12);
+    font-size: 0.75rem;
+    color: #94a3b8;
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  
+  .legend span { display: flex; align-items: center; gap: 0.35rem; }
+  .legend .swatch {
+    width: 12px; height: 12px; border-radius: 3px;
+    display: inline-block;
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  
+  .stats {
+    text-align: center;
+    margin-top: 0.8rem;
+    font-size: 0.78rem;
+    color: #64748b;
+    font-family: 'JetBrains Mono', monospace;
+  }
+</style>
+</head>
+<body>
+
+<h1>GoogleWorkspaceDsc</h1>
+<p class="subtitle">Configuration as Code — Architectural Overview</p>
+
+<div class="diagram">
+
+  <!-- Layer 1: Google Workspace Tenant (APIs) -->
+  <div class="layer l-tenant">
+    <div class="layer-label"><span class="dot"></span> Google Workspace Tenant — 11 APIs</div>
+    <div class="boxes">
+      <div class="box">Admin SDK<small>Directory API v1</small></div>
+      <div class="box">Cloud Identity<small>Policy, SSO, Groups</small></div>
+      <div class="box">Chrome Policy<small>per-OU policies</small></div>
+      <div class="box">Chrome Enterprise<small>CBCM browsers</small></div>
+      <div class="box">Access Ctx Mgr<small>BeyondCorp levels</small></div>
+      <div class="box">Gmail<small>routing, compliance</small></div>
+      <div class="box">Vault<small>retention, holds</small></div>
+      <div class="box">Alert Center<small>rules, alerts</small></div>
+      <div class="box">License Mgr<small>SKU assignments</small></div>
+      <div class="box">Groups Settings<small>group policies</small></div>
+      <div class="box">ChromeOS Mgmt<small>telemetry</small></div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="flow-arrow"><div class="shaft"></div><div class="head"></div><span>REST / JSON</span></div>
+    <div class="flow-arrow"><div class="shaft"></div><div class="head"></div><span>OAuth2 + DWD</span></div>
+  </div>
+
+  <!-- Layer 2: Auth + Secrets -->
+  <div class="layer l-auth">
+    <div class="layer-label"><span class="dot"></span> Authentication & Configuration — auth.py · config.py · secrets.py</div>
+    <div class="boxes">
+      <div class="box">secrets.py<small>in-memory resolve</small></div>
+      <div class="box">↦ _decode_payload()<small>base64 / raw JSON</small></div>
+      <div class="box">auth.py<small>from_sa_info()</small></div>
+      <div class="box">↦ tenacity retry<small>429 / 5xx backoff</small></div>
+      <div class="box">↦ build_service()<small>discovery + cache</small></div>
+      <div class="box">config.py<small>Pydantic models</small></div>
+      <div class="box">↦ ResourceCatalogue<small>32 modules metadata</small></div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="flow-arrow"><span>resolve_key_info()</span><div class="shaft"></div><div class="head"></div></div>
+  </div>
+
+  <!-- Layer 3: Secret Backends -->
+  <div class="layer l-secrets">
+    <div class="layer-label"><span class="dot"></span> Secret Backends — credential sources (no temp files)</div>
+    <div class="boxes">
+      <div class="box">Azure Key Vault<small>DefaultAzureCredential</small></div>
+      <div class="box">GCP Secret Manager<small>secretmanager API</small></div>
+      <div class="box">Environment Variable<small>raw or base64</small></div>
+      <div class="box">Local File<small>legacy — dev only</small></div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="flow-arrow"><span>build_service()</span><div class="shaft"></div><div class="head"></div></div>
+  </div>
+
+  <!-- Layer 4: Resource Modules -->
+  <div class="layer l-resources">
+    <div class="layer-label"><span class="dot"></span> Resource Modules — 32 modules · BaseResource → export_all() / import_one() / get_key()</div>
+    <div class="boxes">
+      <div class="box">customer<small>tenant settings</small></div>
+      <div class="box">org_units<small>OU tree</small></div>
+      <div class="box">users<small>accounts</small></div>
+      <div class="box">groups<small>+ settings</small></div>
+      <div class="box">group_members<small>memberships</small></div>
+      <div class="box">roles<small>admin roles</small></div>
+      <div class="box">role_assignments<small>role → user</small></div>
+      <div class="box readonly">domains<small>read-only</small></div>
+      <div class="box">schemas<small>custom attrs</small></div>
+      <div class="box readonly">app_access<small>3p tokens, ro</small></div>
+      <div class="box">chrome_policies<small>per-OU</small></div>
+      <div class="box readonly">chrome_browsers<small>CBCM, ro</small></div>
+      <div class="box">chrome_printers<small>CUPS fleet</small></div>
+      <div class="box readonly">chromeos_telemetry<small>health, ro</small></div>
+      <div class="box">ci_policies<small>90+ families</small></div>
+      <div class="box">ci_saml_sso<small>IdP profiles</small></div>
+      <div class="box">ci_oidc_sso<small>OIDC profiles</small></div>
+      <div class="box">ci_sso_assign<small>SSO → OU</small></div>
+      <div class="box readonly">ci_devices<small>endpoints, ro</small></div>
+      <div class="box">ci_groups<small>security grp</small></div>
+      <div class="box readonly">ci_user_invitations<small>unmanaged, ro</small></div>
+      <div class="box">context_aware<small>access levels</small></div>
+      <div class="box">vault_retention<small>holds + rules</small></div>
+      <div class="box readonly">alert_center<small>alerts, ro</small></div>
+      <div class="box">license_assign<small>SKU → user</small></div>
+      <div class="box readonly">admin_legacy<small>SMTP gw, ro</small></div>
+      <div class="box">contact_deleg<small>contacts</small></div>
+      <div class="box readonly">data_transfers<small>audit, ro</small></div>
+      <div class="box">email_settings<small>Gmail cfg</small></div>
+      <div class="box">security<small>2SV posture</small></div>
+      <div class="box">calendar_res<small>rooms</small></div>
+      <div class="box readonly">mobile_devices<small>inventory, ro</small></div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="flow-arrow"><span>export_cleaned()</span><div class="shaft"></div><div class="head"></div></div>
+    <div class="flow-arrow"><span>import_one()</span><div class="shaft"></div><div class="head"></div></div>
+    <div class="flow-arrow"><span>get_key()</span><div class="shaft"></div><div class="head"></div></div>
+  </div>
+
+  <!-- Layer 5: Engines -->
+  <div class="layer l-engines">
+    <div class="layer-label"><span class="dot"></span> Engines — orchestration · diff · apply · reporting</div>
+    <div class="boxes">
+      <div class="box">ExportEngine<small>export_engine.py</small></div>
+      <div class="box" style="min-width:160px">→ iterate REGISTRY<br>→ per-resource JSON<br>→ _metadata.json<br>→ latest.json ptr<small>orchestrator</small></div>
+      <div class="box">DiffEngine<small>diff_engine.py</small></div>
+      <div class="box" style="min-width:160px">→ key-based matching<br>→ DeepDiff recursive<br>→ added / removed / modified<small>semantic comparison</small></div>
+      <div class="box">ImportEngine<small>import_engine.py</small></div>
+      <div class="box" style="min-width:160px">→ dependency order<br>→ plan (dry-run)<br>→ apply (converge)<br>→ optional delete<small>tenant cloning</small></div>
+      <div class="box">ReportEngine<small>report_engine.py</small></div>
+      <div class="box" style="min-width:130px">→ Jinja2 templates<br>→ HTML self-contained<br>→ Markdown<small>drift reports</small></div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="flow-arrow"><span>write / read JSON</span><div class="shaft"></div><div class="head"></div></div>
+  </div>
+
+  <!-- Layer 6: Store -->
+  <div class="layer l-store">
+    <div class="layer-label"><span class="dot"></span> Versioned Artifact Store — git_store.py · gcs_store.py</div>
+    <div class="boxes">
+      <div class="box">GitStore<small>commit + tag + push</small></div>
+      <div class="box">GCSStore<small>versioned bucket</small></div>
+      <div class="box">Local<small>filesystem + latest.json</small></div>
+      <div class="box" style="min-width:240px; text-align:left;">
+        artifacts/<br>
+        ├── 2025-03-09T020000Z/<br>
+        │ ├── users.json<br>
+        │ ├── ci_policies.json<br>
+        │ ├── ... (32 files)<br>
+        │ └── _metadata.json<br>
+        └── latest.json
+        <small style="font-family:'JetBrains Mono',monospace">per-resource JSON artifacts</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="flow-arrow"><span>scheduled / manual trigger</span><div class="shaft"></div><div class="head"></div></div>
+  </div>
+
+  <!-- Layer 7: Pipelines + CLI -->
+  <div class="layer l-pipeline">
+    <div class="layer-label"><span class="dot"></span> Pipelines & CLI</div>
+    <div class="pipeline-split">
+      <div class="pipe-col pipe-azure">
+        <div class="pipe-title">Pipeline A — Azure DevOps (Linux or Windows)</div>
+        <div class="pipe-steps">
+          <span class="pipe-step">cron 02:00</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">checkout</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">pip install</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">gwsdsc export</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">gwsdsc diff</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">git commit+tag</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step gate">approval gate</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">gwsdsc apply</span>
+        </div>
+      </div>
+      <div class="pipe-col pipe-gcp">
+        <div class="pipe-title">Pipeline B — Google Cloud</div>
+        <div class="pipe-steps">
+          <span class="pipe-step">Scheduler</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">Cloud Build</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">Secret Mgr</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">gwsdsc export</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">gsutil → GCS</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">gwsdsc diff</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step gate">approval</span>
+          <span class="arrow-sym">→</span>
+          <span class="pipe-step">gwsdsc apply</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><span class="swatch" style="background:rgba(34,197,94,0.35)"></span> Importable (export + apply)</span>
+    <span><span class="swatch" style="background:rgba(34,197,94,0.15);border-style:dashed"></span> Read-only (export + diff only)</span>
+    <span><span class="swatch" style="background:rgba(239,68,68,0.2);border:1px dashed rgba(239,68,68,0.4)"></span> Approval gate required</span>
+  </div>
+
+  <div class="stats">
+    32 resource modules · 11 Google APIs · 48 OAuth scopes · 72 files · 9,400 lines
+  </div>
+</div>
+
+</body>
+</html>
